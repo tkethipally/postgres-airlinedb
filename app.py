@@ -6,10 +6,13 @@ import json
 from datetime import datetime
 from PIL import Image
 import base64
+from requests_aws4auth import AWS4Auth
 
 # ----------- CONFIG -----------
 AWS_REGION = "us-east-1"
 API_GATEWAY_URL = "https://your-api-gateway-url.execute-api.region.amazonaws.com/prod/chat"
+LAMBDA_FUNCTION_URL = "https://your-function-id.lambda-url.us-east-1.on.aws/"
+USE_FUNCTION_URL_WITH_IAM = True
 DYNAMODB_TABLE = "ChatHistory"
 LOCAL_LOG_DIR = "chat_logs"
 
@@ -48,7 +51,8 @@ def logo_base64(path):
         return base64.b64encode(f.read()).decode()
 
 def load_chat_history(session_id):
-    local_path = os.path.join(LOCAL_LOG_DIR, f"{session_id}.json")
+    user_folder = os.path.join(LOCAL_LOG_DIR, username)
+    local_path = os.path.join(user_folder, f"{session_id}.json")
     if os.path.exists(local_path):
         with open(local_path, "r") as f:
             return json.load(f)
@@ -58,8 +62,9 @@ def load_chat_history(session_id):
     return []
 
 def save_chat_history(session_id, chat_history):
-    os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
-    local_path = os.path.join(LOCAL_LOG_DIR, f"{session_id}.json")
+    user_folder = os.path.join(LOCAL_LOG_DIR, username)
+    os.makedirs(user_folder, exist_ok=True)
+    local_path = os.path.join(user_folder, f"{session_id}.json")
     with open(local_path, "w") as f:
         json.dump(chat_history, f)
     if not USE_LOCAL_ONLY:
@@ -89,8 +94,9 @@ with st.sidebar:
     st.markdown("### 📂 Previous chats")
 
     session_files = {}
-    os.makedirs(LOCAL_LOG_DIR, exist_ok=True)
-    local_files = [f for f in os.listdir(LOCAL_LOG_DIR) if f.endswith(".json")]
+    user_folder = os.path.join(LOCAL_LOG_DIR, username)
+    os.makedirs(user_folder, exist_ok=True)
+    local_files = [f for f in os.listdir(user_folder) if f.endswith(".json")]
 
     for fname in sorted(local_files):
         session_id = fname[:-5]
@@ -120,8 +126,30 @@ if prompt:
     with st.chat_message("user"):
         st.markdown(prompt)
 
-    lambda_response = requests.post(API_GATEWAY_URL, json={"prompt": prompt}).json()
-    reply = lambda_response.get("response", "Sorry, something went wrong.")
+    try:
+        if USE_FUNCTION_URL_WITH_IAM:
+            session = boto3.Session()
+            credentials = session.get_credentials().get_frozen_credentials()
+            auth = AWS4Auth(
+                credentials.access_key,
+                credentials.secret_key,
+                AWS_REGION,
+                "lambda",
+                session_token=credentials.token,
+            )
+            response = requests.post(
+                LAMBDA_FUNCTION_URL,
+                json={"prompt": prompt},
+                auth=auth,
+                timeout=10
+            )
+        else:
+            response = requests.post(API_GATEWAY_URL, json={"prompt": prompt}, timeout=10)
+
+        lambda_response = response.json()
+        reply = lambda_response.get("response", "Sorry, something went wrong.")
+    except Exception as e:
+        reply = f"⚠️ Error: {e}"
 
     st.session_state.chat_history.append({"role": "assistant", "content": reply})
     with st.chat_message("assistant"):
